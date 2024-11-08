@@ -3,18 +3,14 @@ from tkinter import filedialog, messagebox
 from tkinter import ttk
 import requests
 from PIL import Image, ImageTk
-import fitz  # PyMuPDF
 import win32print
 import win32ui
 from PIL import ImageWin
 import os
 import tempfile
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+import configparser
+
+CONFIG_FILE = "config.ini"
 
 class QRPrinterApp:
     def __init__(self, root):
@@ -22,14 +18,21 @@ class QRPrinterApp:
         self.root.title("QR Printer App")
         self.root.geometry("500x400")
 
+        # Загрузка конфигурации
+        self.config = configparser.ConfigParser()
+        self.load_config()
+
         # Поле ввода ссылки
         self.url_label = tk.Label(root, text="Введите ссылку:")
         self.url_label.pack(pady=10)
         self.url_entry = tk.Entry(root, width=60)
         self.url_entry.pack(pady=5)
 
+        # Добавляем обработку Ctrl+V и контекстное меню
+        self.add_context_menu(self.url_entry)
+
         # Кнопка загрузки
-        self.download_button = tk.Button(root, text="Загрузить QR-код", command=self.process_link)
+        self.download_button = tk.Button(root, text="Загрузить QR-код", command=self.download_image)
         self.download_button.pack(pady=10)
 
         # Поле для отображения изображения
@@ -42,77 +45,61 @@ class QRPrinterApp:
 
         # Выбор принтера
         self.printers = [printer[2] for printer in win32print.EnumPrinters(2)]
-        self.selected_printer = tk.StringVar(value=self.printers[0] if self.printers else "")
+        self.selected_printer = tk.StringVar()
         self.printer_combo = ttk.Combobox(root, values=self.printers, textvariable=self.selected_printer)
         self.printer_combo.pack(pady=5)
 
+        # Установить сохранённый принтер, если он есть
+        saved_printer = self.config.get("Settings", "printer", fallback="")
+        if saved_printer in self.printers:
+            self.selected_printer.set(saved_printer)
+        else:
+            self.selected_printer.set(self.printers[0] if self.printers else "")
+
+        # Обработчик изменения выбора принтера
+        self.printer_combo.bind("<<ComboboxSelected>>", self.save_printer)
+
         self.generated_image = None
 
-    def process_link(self):
+    def add_context_menu(self, widget):
+        # Создаем контекстное меню
+        context_menu = tk.Menu(widget, tearoff=0)
+        context_menu.add_command(label="Вставить", command=lambda: widget.event_generate("<<Paste>>"))
+
+        # Привязываем меню к правой кнопке мыши
+        widget.bind("<Button-3>", lambda event: context_menu.tk_popup(event.x_root, event.y_root))
+
+        # Обрабатываем Ctrl+V
+        widget.bind("<Control-v>", lambda event: widget.event_generate("<<Paste>>"))
+
+    def load_config(self):
+        if os.path.exists(CONFIG_FILE):
+            self.config.read(CONFIG_FILE)
+        else:
+            self.config["Settings"] = {}
+
+    def save_printer(self, event=None):
+        printer_name = self.selected_printer.get()
+        self.config["Settings"]["printer"] = printer_name
+        with open(CONFIG_FILE, "w") as config_file:
+            self.config.write(config_file)
+
+    def download_image(self):
         url = self.url_entry.get().strip()
         if not url:
             messagebox.showerror("Ошибка", "Введите ссылку!")
             return
 
         try:
-            if url.startswith("blob:"):
-                # Обработка ссылки blob: с использованием Selenium
-                self.download_blob_image(url)
-            elif url.endswith(".pdf"):
-                # Обработка PDF-файла
-                self.download_pdf(url)
-            else:
-                # Загрузка изображения по прямой ссылке
-                response = requests.get(url)
-                response.raise_for_status()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
-                    temp_file.write(response.content)
-                    self.generated_image = Image.open(temp_file.name)
-                    self.show_image()
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить изображение: {str(e)}")
-
-    def download_blob_image(self, url):
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get(url)
-
-        try:
-            # Ожидание загрузки изображения
-            image_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "img"))
-            )
-            src = image_element.get_attribute("src")
-            response = requests.get(src)
+            # Загрузка изображения по ссылке
+            response = requests.get(url)
             response.raise_for_status()
-
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
                 temp_file.write(response.content)
                 self.generated_image = Image.open(temp_file.name)
                 self.show_image()
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить изображение blob: {str(e)}")
-        finally:
-            driver.quit()
-
-    def download_pdf(self, url):
-        response = requests.get(url)
-        response.raise_for_status()
-
-        pdf_path = tempfile.mktemp(suffix=".pdf")
-        with open(pdf_path, "wb") as pdf_file:
-            pdf_file.write(response.content)
-
-        # Извлечение QR-кода из PDF
-        with fitz.open(pdf_path) as pdf:
-            for page in pdf:
-                pix = page.get_pixmap()
-                image_path = tempfile.mktemp(suffix=".png")
-                pix.save(image_path)
-                self.generated_image = Image.open(image_path)
-                self.show_image()
-                break
+            messagebox.showerror("Ошибка", f"Не удалось загрузить изображение: {str(e)}")
 
     def show_image(self):
         img = self.generated_image.resize((200, 200), Image.ANTIALIAS)
